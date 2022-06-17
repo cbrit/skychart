@@ -2,13 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
-
 	"github.com/cmwaters/skychart/types"
+	"github.com/gorilla/mux"
 )
 
 // Handler is the core object in the server package. It keeps an in-memory state
@@ -19,23 +20,34 @@ type Handler struct {
 	lastUpdated  time.Time
 	chains       []string
 	assets       []string
-	chainByAsset map[string]string // asset name -> chain name
-	chainById    map[string]string // chain id -> chain name
+	paths        []string
+	chainByAsset map[string]string                  // asset name -> chain name
+	chainById    map[string]string                  // chain id -> chain name
+	pathsByTag   map[string]map[string][]types.Path // tag -> paths
 	chainList    map[string]types.Chain
 	assetList    map[string]types.AssetList
+	pathList     map[string]types.Path
 	log          *log.Logger
 }
 
 func NewHandler(registryUrl string, log *log.Logger) *Handler {
+	pathsByTag := make(map[string]map[string][]types.Path)
+	pathsByTag["dex"] = make(map[string][]types.Path)
+	pathsByTag["preferred"] = make(map[string][]types.Path)
+	pathsByTag["properties"] = make(map[string][]types.Path)
+	pathsByTag["status"] = make(map[string][]types.Path)
 	return &Handler{
 		registryUrl:  registryUrl,
 		lastUpdated:  time.Unix(0, 0),
 		chains:       make([]string, 0),
 		assets:       make([]string, 0),
+		paths:        make([]string, 0),
 		chainByAsset: make(map[string]string),
 		chainById:    make(map[string]string),
+		pathsByTag:   pathsByTag,
 		chainList:    make(map[string]types.Chain),
 		assetList:    make(map[string]types.AssetList),
+		pathList:     make(map[string]types.Path),
 		log:          log,
 	}
 }
@@ -142,6 +154,98 @@ func (h Handler) Asset(res http.ResponseWriter, req *http.Request) {
 	resourceNotFound(res)
 }
 
+func (h Handler) PathNames(res http.ResponseWriter, req *http.Request) {
+	respondWithJSON(res, h.paths)
+}
+
+func (h Handler) Paths(res http.ResponseWriter, req *http.Request) {
+	paths := []types.Path{}
+
+	for _, path := range h.pathList {
+		paths = append(paths, path)
+	}
+
+	respondWithJSON(res, paths)
+}
+
+func (h Handler) PathsFiltered(res http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	dex, ok := vars["dex"]
+	if ok {
+		respondWithJSON(res, h.getPathsWithTag("dex", dex))
+		return
+	}
+	preferred, ok := vars["preferred"]
+	if ok {
+		respondWithJSON(res, h.getPathsWithTag("preferred", preferred))
+		return
+	}
+	properties, ok := vars["properties"]
+	if ok {
+		respondWithJSON(res, h.getPathsWithTag("properties", properties))
+		return
+	}
+	status, ok := vars["status"]
+	if ok {
+		respondWithJSON(res, h.getPathsWithTag("status", status))
+		return
+	}
+
+	// this should never be reached
+	respondWithJSON(res, []types.Path{})
+}
+
+// Path searches for a path by chain name pair "{chain1Name}-{chain2Name}"
+func (h Handler) Path(res http.ResponseWriter, req *http.Request) {
+	vars := mux.Vars(req)
+	pathName, ok := vars["path"]
+	if !ok {
+		badRequest(res)
+		return
+	}
+
+	// The router should reject input that doesn't match the "{chain1Name}-{chain2Name}" pattern
+	chainNames := strings.Split(pathName, "-")
+	pathName = h.getPathName(chainNames[0], chainNames[1])
+	exists, path := h.findPath(pathName)
+	if !exists {
+		resourceNotFound(res)
+		return
+	}
+	respondWithJSON(res, path)
+}
+
+func (h Handler) getPathsWithTag(tag string, value string) []types.Path {
+	if len(value) == 0 {
+		paths := []types.Path{}
+
+		for _, path := range h.pathList {
+			paths = append(paths, path)
+		}
+
+		return paths
+	}
+	byTag, ok := h.pathsByTag[tag]
+	if !ok {
+		panic(fmt.Sprintf("pathsByTag doesn't contain tag key \"%s\"", tag))
+	}
+
+	matches, ok := byTag[value]
+	if !ok {
+		return []types.Path{}
+	}
+
+	return matches
+}
+
+func (h Handler) getPathName(chain1Name string, chain2Name string) string {
+	if strings.Compare(chain1Name, chain2Name) == 1 {
+		return fmt.Sprintf("%s-%s", chain2Name, chain1Name)
+	}
+
+	return fmt.Sprintf("%s-%s", chain1Name, chain2Name)
+}
+
 func (h Handler) findChain(name string) (bool, types.Chain) {
 	chain, ok := h.chainList[name]
 	if ok {
@@ -154,6 +258,15 @@ func (h Handler) findChain(name string) (bool, types.Chain) {
 	}
 
 	return true, h.chainList[name]
+}
+
+func (h Handler) findPath(name string) (bool, types.Path) {
+	path, ok := h.pathList[name]
+	if !ok {
+		return false, types.Path{}
+	}
+
+	return true, path
 }
 
 func respondWithJSON(w http.ResponseWriter, payload interface{}) {

@@ -31,6 +31,17 @@ func Serve(ctx context.Context, registryUrl, listenAddr, updateFreq string) erro
 	v1Router.HandleFunc("/chain/{chain}/assets", handler.ChainAsset).Methods("GET")
 	v1Router.HandleFunc("/assets", handler.Assets).Methods("GET")
 	v1Router.HandleFunc("/asset/{asset}", handler.Asset).Methods("GET")
+	v1Router.HandleFunc("/paths", handler.PathsFiltered).
+		Queries("dex", "{dex}")
+	v1Router.HandleFunc("/paths", handler.PathsFiltered).
+		Queries("preferred", "{preferred}")
+	v1Router.HandleFunc("/paths", handler.PathsFiltered).
+		Queries("properties", "{properties}")
+	v1Router.HandleFunc("/paths", handler.PathsFiltered).
+		Queries("status", "{status}")
+	v1Router.HandleFunc("/paths", handler.Paths).Methods("GET")
+	v1Router.HandleFunc("/path/{path:\\w-\\w}", handler.Path).Methods("GET")
+	v1Router.HandleFunc("/path_names", handler.PathNames).Methods("GET")
 	s := http.Server{Addr: listenAddr, Handler: router}
 
 	errs := make(chan error, 1)

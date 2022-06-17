@@ -6,11 +6,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cmwaters/skychart/types"
 )
+
+const DEX = "dex"
+const PREFERRED = "preferred"
+const PROPERTIES = "properties"
+const STATUS = "status"
 
 // Pull requests all registry information from a github repo and updates the
 // handlers local registry. It expects a directory structure as follows:
@@ -37,6 +43,11 @@ func (h *Handler) Pull(ctx context.Context) error {
 		return err
 	}
 
+	// update paths
+	if err := h.getPaths(); err != nil {
+		return err
+	}
+
 	// for each chain update the chain info and asset list
 	// TODO: If we wanted to be more creative we could first check
 	// to see if the file had actually changed since the last time
@@ -46,6 +57,13 @@ func (h *Handler) Pull(ctx context.Context) error {
 			return err
 		}
 		if err := h.getAssetList(chain); err != nil {
+			return err
+		}
+	}
+
+	for _, path := range h.paths {
+		names := strings.Split(path, "-")
+		if err := h.getPath(names[0], names[1]); err != nil {
 			return err
 		}
 	}
@@ -104,12 +122,8 @@ func (h *Handler) getChains() error {
 		}
 
 		chains = append(chains, name)
-
-		fmt.Printf("%s, ", name)
 	}
-	fmt.Printf("\n")
 	h.chains = chains
-	fmt.Print(len(h.chains))
 	return nil
 }
 
@@ -176,6 +190,102 @@ func (h *Handler) getAssetList(name string) error {
 	return nil
 }
 
+func (h *Handler) getPaths() error {
+	query := fmt.Sprintf("https://api.github.com/repos/%s/contents/_IBC", h.registryUrl)
+	resp, err := http.Get(query)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code from query %s: %d", query, resp.StatusCode)
+	}
+
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	var repo []map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &repo); err != nil {
+		return fmt.Errorf("unmarshalling repo: %w", err)
+	}
+
+	paths := make([]string, 0)
+	for _, entry := range repo {
+		// only accept directories
+		entryType := entry["type"].(string)
+		if entryType != "file" {
+			continue
+		}
+
+		name := entry["name"].(string)
+		if !strings.Contains(name, ".json") {
+			continue
+		}
+		if !strings.Contains(name, "-") {
+			continue
+		}
+
+		name = strings.Split(name, ".")[0]
+		paths = append(paths, name)
+
+	}
+	h.paths = paths
+	return nil
+}
+
+func (h *Handler) getPath(chain1Name string, chain2Name string) error {
+	name := h.getPathName(chain1Name, chain2Name)
+	query := fmt.Sprintf("https://raw.githubusercontent.com/%s/master/_IBC/%s.json", h.registryUrl, name)
+	resp, err := http.Get(query)
+	if err != nil {
+		return err
+	}
+
+	// If the path file doesn't exist we simply ignore it
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code from query %s: %d", query, resp.StatusCode)
+	}
+
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	var path types.Path
+	err = json.Unmarshal(bodyBytes, &path)
+	if err != nil {
+		return err
+	}
+	h.pathList[name] = path
+
+	for _, channel := range path.Channels {
+		status := channel.Tags.Status
+		dex := channel.Tags.Dex
+		preferred := strconv.FormatBool(channel.Tags.Preferred)
+		properties := channel.Tags.Properties
+		if len(channel.Tags.Dex) > 0 {
+			h.pathsByTag[DEX][dex] = append(h.pathsByTag[DEX][dex], path)
+		}
+
+		h.pathsByTag[PREFERRED][preferred] = append(h.pathsByTag[PREFERRED][preferred], path)
+
+		if len(channel.Tags.Properties) > 0 {
+			h.pathsByTag[PROPERTIES][properties] = append(h.pathsByTag[PROPERTIES][properties], path)
+		}
+
+		if len(channel.Tags.Status) > 0 {
+			h.pathsByTag[STATUS][status] = append(h.pathsByTag[STATUS][status], path)
+		}
+	}
+
+	return nil
+}
+
 // recentCommits returns true if there has been a commit more recent than the time the handler
 // last updated
 func (h Handler) recentCommits() (bool, error) {
@@ -190,6 +300,9 @@ func (h Handler) recentCommits() (bool, error) {
 	}
 
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		h.log.Printf("error reading response body while checking for recent commits: %s", err)
+	}
 
 	var body []interface{}
 	err = json.Unmarshal(bodyBytes, &body)
